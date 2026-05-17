@@ -1,0 +1,9 @@
+<Project>
+    <PropertyGroup>
+        <!-- Godot/Megadot 可执行文件路径 (用于 PCK 导出，仅编译 DLL 不需要) -->
+        <!-- <GodotPath>C:/megadot/MegaDot_v4.5.1-stable_mono_win64.exe</GodotPath> -->
+
+        <!-- 如果 STS2 路径未自动检测到，取消注释并手动设置 -->
+        <!-- <Sts2Path>C:/Program Files (x86)/Steam/steamapps/common/Slay the Spire 2</Sts2Path> -->
+    </PropertyGroup>
+</Project>

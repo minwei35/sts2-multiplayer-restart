@@ -1,0 +1,66 @@
+<Project Sdk="Microsoft.NET.Sdk" InitialTargets="CheckDependencyPaths">
+    <Import Project=".\Sts2PathDiscovery.props"/>
+
+    <PropertyGroup>
+        <TargetFramework>net9.0</TargetFramework>
+        <LangVersion>latest</LangVersion>
+        <Nullable>enable</Nullable>
+        <ImplicitUsings>enable</ImplicitUsings>
+        <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+        <AssemblyName>MultiplayerRestart</AssemblyName>
+        <RootNamespace>MultiplayerRestart</RootNamespace>
+        <OutputPath>bin\$(Configuration)\</OutputPath>
+        <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
+    </PropertyGroup>
+
+    <PropertyGroup>
+        <NoWarn>$(NoWarn);MSB3270</NoWarn>
+    </PropertyGroup>
+
+    <ItemGroup Condition="Exists('$(Sts2DataDir)')">
+        <Reference Include="sts2">
+            <HintPath>$(Sts2DataDir)/sts2.dll</HintPath>
+            <Private>false</Private>
+        </Reference>
+        <Reference Include="0Harmony">
+            <HintPath>$(Sts2DataDir)/0Harmony.dll</HintPath>
+            <Private>false</Private>
+        </Reference>
+        <Reference Include="GodotSharp">
+            <HintPath>$(Sts2DataDir)/GodotSharp.dll</HintPath>
+            <Private>false</Private>
+        </Reference>
+    </ItemGroup>
+
+    <!-- 备用: 从 references/ 目录加载 DLL (手动复制) -->
+    <ItemGroup Condition="!Exists('$(Sts2DataDir)')">
+        <Reference Include="sts2">
+            <HintPath>references/sts2.dll</HintPath>
+            <Private>false</Private>
+        </Reference>
+        <Reference Include="0Harmony">
+            <HintPath>references/0Harmony.dll</HintPath>
+            <Private>false</Private>
+        </Reference>
+        <Reference Include="GodotSharp">
+            <HintPath>references/GodotSharp.dll</HintPath>
+            <Private>false</Private>
+        </Reference>
+    </ItemGroup>
+
+    <Target Name="CheckDependencyPaths">
+        <Warning Text="STS2 data directory not found at '$(Sts2DataDir)'. Falling back to references/ folder."
+                 Condition="'$(Sts2DataDir)' == '' or !Exists('$(Sts2DataDir)')" />
+        <Error Text="Could not find sts2.dll. Either set Sts2Path in Directory.Build.props or copy game DLLs to references/ folder."
+               Condition="!Exists('$(Sts2DataDir)/sts2.dll') and !Exists('references/sts2.dll')" />
+    </Target>
+
+    <!-- 构建后自动复制到 mods 目录 -->
+    <Target Name="CopyToModsFolder" AfterTargets="PostBuildEvent" Condition="'$(ModsPath)' != '' and Exists('$(ModsPath)')">
+        <Message Text="Copying mod files to $(ModsPath)MultiplayerRestart/" Importance="high" />
+        <MakeDir Directories="$(ModsPath)MultiplayerRestart/" />
+        <Copy SourceFiles="$(TargetPath)" DestinationFolder="$(ModsPath)MultiplayerRestart/" />
+        <Copy SourceFiles="MultiplayerRestart.json" DestinationFolder="$(ModsPath)MultiplayerRestart/" />
+        <Copy SourceFiles="$(TargetDir)$(TargetName).pdb" DestinationFolder="$(ModsPath)MultiplayerRestart/" Condition="Exists('$(TargetDir)$(TargetName).pdb')" />
+    </Target>
+</Project>

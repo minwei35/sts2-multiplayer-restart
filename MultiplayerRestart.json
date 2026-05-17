@@ -1,0 +1,11 @@
+{
+  "id": "MultiplayerRestart",
+  "name": "Multiplayer Restart",
+  "author": "KURO",
+  "description": "Allows the host to restart a multiplayer co-op run. Press Ctrl+Shift+R or use the pause menu button.",
+  "version": "v1.0.0",
+  "has_pck": false,
+  "has_dll": true,
+  "dependencies": [],
+  "affects_gameplay": true
+}
