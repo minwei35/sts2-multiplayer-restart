@@ -1,7 +1,7 @@
 {
   "id": "MultiplayerRestart",
   "name": "Multiplayer Restart",
-  "author": "KURO",
+  "author": "minwei35",
   "description": "Allows the host to restart a multiplayer co-op run. Press Ctrl+Shift+R or use the pause menu button.",
   "version": "v1.0.0",
   "has_pck": false,
