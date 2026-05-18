@@ -11,7 +11,9 @@ public static class PauseMenuPatch
     private static readonly HashSet<ulong> _injectedNodes = new();
 
     private static Type? _pauseMenuButtonType;
+    private static Type? _nClickableControlType;
     private static FieldInfo? _buttonContainerField;
+    private static EventInfo? _releasedEvent;
 
     public static void TryApplyManualPatch(Harmony harmony)
     {
@@ -24,16 +26,23 @@ public static class PauseMenuPatch
             return;
         }
 
-        // 发现 NPauseMenuButton 类型和 _buttonContainer 字段
         _pauseMenuButtonType = AccessTools.TypeByName(
             "MegaCrit.Sts2.Core.Nodes.Screens.PauseMenu.NPauseMenuButton");
+        _nClickableControlType = AccessTools.TypeByName(
+            "MegaCrit.Sts2.Core.Nodes.GodotExtensions.NClickableControl");
         _buttonContainerField = pauseType.GetField("_buttonContainer",
             BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
 
-        Log.Info($"[MultiplayerRestart] NPauseMenuButton type: {(_pauseMenuButtonType != null ? "OK" : "MISSING")}");
-        Log.Info($"[MultiplayerRestart] _buttonContainer field: {(_buttonContainerField != null ? "OK" : "MISSING")}");
+        // NClickableControl.Released 事件
+        if (_nClickableControlType != null)
+            _releasedEvent = _nClickableControlType.GetEvent("Released",
+                BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
 
-        // Patch _Ready 方法
+        Log.Info($"[MultiplayerRestart] NPauseMenuButton: {(_pauseMenuButtonType != null ? "OK" : "MISSING")}");
+        Log.Info($"[MultiplayerRestart] NClickableControl: {(_nClickableControlType != null ? "OK" : "MISSING")}");
+        Log.Info($"[MultiplayerRestart] _buttonContainer: {(_buttonContainerField != null ? "OK" : "MISSING")}");
+        Log.Info($"[MultiplayerRestart] Released event: {(_releasedEvent != null ? "OK" : "MISSING")}");
+
         var readyMethod = pauseType.GetMethod("_Ready",
             BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
         if (readyMethod != null)
@@ -51,7 +60,6 @@ public static class PauseMenuPatch
             }
         }
 
-        // 同时 patch openPauseMenu 以便每次打开时检查
         var openMethod = pauseType.GetMethod("openPauseMenu",
             BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
         if (openMethod != null)
@@ -72,7 +80,6 @@ public static class PauseMenuPatch
     public static void OnPauseMenuReady(object __instance)
     {
         if (__instance is not Node node) return;
-        // 延迟注入，等子节点加载完成
         var timer = node.GetTree().CreateTimer(0.2);
         timer.Connect("timeout", Callable.From(new Action(() => TryInjectButton(node))));
     }
@@ -80,8 +87,6 @@ public static class PauseMenuPatch
     public static void OnPauseMenuOpened(object __instance)
     {
         if (__instance is not Node node) return;
-        // 每次打开时检查
-        node.CallDeferred(new StringName("_inject_restart_check"));
         var timer = node.GetTree().CreateTimer(0.1);
         timer.Connect("timeout", Callable.From(new Action(() => TryInjectButton(node))));
     }
@@ -91,40 +96,32 @@ public static class PauseMenuPatch
         var instanceId = pauseMenuNode.GetInstanceId();
         if (_injectedNodes.Contains(instanceId)) return;
 
-        // 策略1: 通过反射获取 _buttonContainer 字段
         Node? container = null;
+
+        // 策略1: 反射获取 _buttonContainer
         if (_buttonContainerField != null)
         {
             try
             {
                 container = _buttonContainerField.GetValue(pauseMenuNode) as Node;
-                Log.Info($"[MultiplayerRestart] Got _buttonContainer via reflection: {container != null}");
             }
             catch (Exception ex)
             {
-                Log.Warn($"[MultiplayerRestart] Failed to get _buttonContainer: {ex.Message}");
+                Log.Warn($"[MultiplayerRestart] _buttonContainer reflection failed: {ex.Message}");
             }
         }
 
-        // 策略2: 遍历场景树查找 buttonContainer 节点
+        // 策略2: 按名称搜索
         if (container == null)
-        {
-            container = FindNodeByNamePattern(pauseMenuNode, "buttoncontainer", "button_container", "buttons");
-            if (container != null)
-                Log.Info($"[MultiplayerRestart] Found container by name: {container.Name}");
-        }
+            container = FindNodeByNamePattern(pauseMenuNode, "buttoncontainer", "button_container");
 
-        // 策略3: 查找包含多个 NPauseMenuButton 子节点的容器
+        // 策略3: 查找包含 NPauseMenuButton 子节点的节点
         if (container == null)
-        {
             container = FindContainerWithPauseButtons(pauseMenuNode);
-            if (container != null)
-                Log.Info($"[MultiplayerRestart] Found container by button children: {container.Name}");
-        }
 
         if (container == null)
         {
-            Log.Warn("[MultiplayerRestart] Could not find button container. Dumping tree:");
+            Log.Warn("[MultiplayerRestart] Button container not found. Node tree:");
             DumpNodeTree(pauseMenuNode, 0, 3);
             return;
         }
@@ -137,52 +134,31 @@ public static class PauseMenuPatch
 
         _injectedNodes.Add(instanceId);
 
-        // 创建按钮: 优先使用 NPauseMenuButton，否则克隆已有按钮
+        // 找一个模板按钮来克隆
+        Node? templateButton = FindTemplateButton(container);
+
         Node? restartButton = null;
 
-        // 策略A: 克隆一个已有的 NPauseMenuButton
-        Node? templateButton = null;
-        foreach (var child in container.GetChildren())
-        {
-            if (_pauseMenuButtonType != null && _pauseMenuButtonType.IsInstanceOfType(child))
-            {
-                templateButton = child;
-                break;
-            }
-        }
-
+        // 策略A: 克隆已有按钮
         if (templateButton != null)
         {
             try
             {
                 restartButton = (Node)templateButton.Duplicate();
                 restartButton.Name = "RestartRunButton";
-
-                // 通过反射设置按钮文本 (NPauseMenuButton 可能使用 MegaLabel)
                 SetButtonText(restartButton, "Restart Run");
-
-                // 断开原有信号，连接新的
-                DisconnectAllSignals(restartButton, "pressed");
-                DisconnectAllSignals(restartButton, "Pressed");
-
-                if (restartButton is Control ctrl)
-                {
-                    ctrl.Connect("pressed", Callable.From(new Action(() =>
-                    {
-                        RestartManager.TriggerRestart();
-                    })));
-                }
-
-                Log.Info("[MultiplayerRestart] Created restart button by cloning NPauseMenuButton.");
+                RemoveExistingEventHandlers(restartButton);
+                SubscribeReleasedEvent(restartButton);
+                Log.Info("[MultiplayerRestart] Restart button created (cloned).");
             }
             catch (Exception ex)
             {
-                Log.Warn($"[MultiplayerRestart] Failed to clone button: {ex.Message}");
+                Log.Warn($"[MultiplayerRestart] Clone failed: {ex.Message}");
                 restartButton = null;
             }
         }
 
-        // 策略B: 直接实例化 NPauseMenuButton
+        // 策略B: 实例化 NPauseMenuButton
         if (restartButton == null && _pauseMenuButtonType != null)
         {
             try
@@ -190,111 +166,177 @@ public static class PauseMenuPatch
                 restartButton = (Node)Activator.CreateInstance(_pauseMenuButtonType)!;
                 restartButton.Name = "RestartRunButton";
                 SetButtonText(restartButton, "Restart Run");
-
-                if (restartButton is Control ctrl)
-                {
-                    ctrl.Connect("pressed", Callable.From(new Action(() =>
-                    {
-                        RestartManager.TriggerRestart();
-                    })));
-                }
-
-                Log.Info("[MultiplayerRestart] Created restart button via Activator.");
+                SubscribeReleasedEvent(restartButton);
+                Log.Info("[MultiplayerRestart] Restart button created (new instance).");
             }
             catch (Exception ex)
             {
-                Log.Warn($"[MultiplayerRestart] Failed to instantiate NPauseMenuButton: {ex.Message}");
+                Log.Warn($"[MultiplayerRestart] Instantiation failed: {ex.Message}");
                 restartButton = null;
             }
         }
 
-        // 策略C: 使用普通 Button 作为最后手段
+        // 策略C: 普通 Button 回退
         if (restartButton == null)
         {
             var btn = new Button();
             btn.Name = "RestartRunButton";
             btn.Text = "Restart Run";
-            btn.Connect("pressed", Callable.From(new Action(() =>
-            {
-                RestartManager.TriggerRestart();
-            })));
+            btn.Connect("pressed", Callable.From(new Action(OnRestartButtonPressed)));
             CopyStyleFromSibling(container, btn);
             restartButton = btn;
-            Log.Info("[MultiplayerRestart] Created restart button as plain Button (fallback).");
+            Log.Info("[MultiplayerRestart] Restart button created (plain Button fallback).");
         }
 
-        // 插入到 SaveAndQuit/GiveUp 按钮之前
         int insertIdx = FindTargetButtonIndex(container);
         container.AddChild(restartButton);
         if (insertIdx >= 0)
-        {
             container.MoveChild(restartButton, insertIdx);
+
+        TryRebuildFocusNeighbors(pauseMenuNode);
+        Log.Info("[MultiplayerRestart] Restart button injected.");
+    }
+
+    private static void OnRestartButtonPressed()
+    {
+        RestartManager.TriggerRestart();
+    }
+
+    private static void SubscribeReleasedEvent(Node button)
+    {
+        // 方式1: 通过 EventInfo 订阅 Released 事件
+        if (_releasedEvent != null)
+        {
+            try
+            {
+                var handler = Delegate.CreateDelegate(_releasedEvent.EventHandlerType!,
+                    typeof(PauseMenuPatch).GetMethod(nameof(OnRestartButtonReleased),
+                        BindingFlags.NonPublic | BindingFlags.Static)!);
+                _releasedEvent.AddEventHandler(button, handler);
+                Log.Info("[MultiplayerRestart] Subscribed to Released event via EventInfo.");
+                return;
+            }
+            catch (Exception ex)
+            {
+                Log.Warn($"[MultiplayerRestart] EventInfo subscription failed: {ex.Message}");
+            }
         }
 
-        // 重建焦点邻居
-        TryRebuildFocusNeighbors(pauseMenuNode);
+        // 方式2: 通过反射直接调用 add_Released
+        try
+        {
+            var addMethod = button.GetType().GetMethod("add_Released",
+                BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+            if (addMethod != null)
+            {
+                var paramType = addMethod.GetParameters()[0].ParameterType;
+                var handler = Delegate.CreateDelegate(paramType,
+                    typeof(PauseMenuPatch).GetMethod(nameof(OnRestartButtonReleased),
+                        BindingFlags.NonPublic | BindingFlags.Static)!);
+                addMethod.Invoke(button, new object[] { handler });
+                Log.Info("[MultiplayerRestart] Subscribed to Released event via add_Released.");
+                return;
+            }
+        }
+        catch (Exception ex)
+        {
+            Log.Warn($"[MultiplayerRestart] add_Released failed: {ex.Message}");
+        }
 
-        Log.Info("[MultiplayerRestart] Restart button injected into pause menu.");
+        // 方式3: 尝试 Godot 信号 "released"
+        try
+        {
+            if (button is GodotObject go)
+            {
+                go.Connect("released", Callable.From(new Action(OnRestartButtonPressed)));
+                Log.Info("[MultiplayerRestart] Connected via Godot 'released' signal.");
+                return;
+            }
+        }
+        catch { }
+
+        Log.Warn("[MultiplayerRestart] Could not subscribe to any click event on button.");
+    }
+
+    private static void OnRestartButtonReleased()
+    {
+        RestartManager.TriggerRestart();
+    }
+
+    private static void RemoveExistingEventHandlers(Node button)
+    {
+        // 清除克隆按钮上的旧 Released 事件处理器
+        if (_releasedEvent != null)
+        {
+            try
+            {
+                // 通过反射获取 backing field 并清空
+                var backingField = button.GetType().GetField("backing_Released",
+                    BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+                if (backingField != null)
+                {
+                    backingField.SetValue(button, null);
+                    return;
+                }
+            }
+            catch { }
+        }
+
+        // 清除 Pressed 事件
+        try
+        {
+            var backingField = button.GetType().GetField("backing_Pressed",
+                BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+            if (backingField != null)
+                backingField.SetValue(button, null);
+        }
+        catch { }
+    }
+
+    private static Node? FindTemplateButton(Node container)
+    {
+        foreach (var child in container.GetChildren())
+        {
+            if (_pauseMenuButtonType != null && _pauseMenuButtonType.IsInstanceOfType(child))
+                return child;
+        }
+        return null;
     }
 
     private static void SetButtonText(Node button, string text)
     {
         var flags = BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance;
 
-        // 尝试 Text 属性 (如果继承自 Button)
+        // 尝试 Text 属性
         var textProp = button.GetType().GetProperty("Text", flags);
         if (textProp != null && textProp.CanWrite)
         {
-            textProp.SetValue(button, text);
-            return;
+            try { textProp.SetValue(button, text); return; } catch { }
         }
 
-        // 尝试 SetText 方法
-        var setTextMethod = button.GetType().GetMethod("SetText", flags);
-        if (setTextMethod != null)
-        {
-            try { setTextMethod.Invoke(button, new object[] { text }); return; } catch { }
-        }
-
-        // 尝试查找 MegaLabel 子节点并设置文本
-        foreach (var child in button.GetChildren())
-        {
-            var childType = child.GetType();
-            if (childType.Name.Contains("MegaLabel") || childType.Name.Contains("Label"))
-            {
-                var labelTextProp = childType.GetProperty("Text", flags);
-                if (labelTextProp != null && labelTextProp.CanWrite)
-                {
-                    labelTextProp.SetValue(child, text);
-                    return;
-                }
-            }
-        }
-
-        // 尝试通过 Godot 的 Set 方法
+        // 通过 Godot Set
         if (button is GodotObject go)
         {
-            try { go.Set("text", text); } catch { }
+            try { go.Set("text", text); return; } catch { }
         }
-    }
 
-    private static void DisconnectAllSignals(Node node, string signalName)
-    {
-        try
+        // 查找 MegaLabel 子节点
+        foreach (var child in button.GetChildren())
         {
-            if (node is GodotObject go)
+            var childTypeName = child.GetType().Name;
+            if (childTypeName.Contains("MegaLabel") || childTypeName.Contains("Label"))
             {
-                var signals = go.GetSignalConnectionList(signalName);
-                foreach (var dict in signals)
+                var labelProp = child.GetType().GetProperty("Text", flags);
+                if (labelProp != null && labelProp.CanWrite)
                 {
-                    if (dict.TryGetValue("callable", out var callable))
-                    {
-                        go.Disconnect(signalName, (Callable)callable);
-                    }
+                    try { labelProp.SetValue(child, text); return; } catch { }
+                }
+                if (child is GodotObject lgo)
+                {
+                    try { lgo.Set("text", text); return; } catch { }
                 }
             }
         }
-        catch { }
     }
 
     private static Node? FindNodeByNamePattern(Node root, params string[] patterns)
@@ -323,7 +365,6 @@ public static class PauseMenuPatch
             }
             if (count >= 2) return root;
         }
-
         foreach (var child in root.GetChildren())
         {
             var found = FindContainerWithPauseButtons(child);
@@ -352,16 +393,9 @@ public static class PauseMenuPatch
         {
             var method = pauseMenuNode.GetType().GetMethod("RebuildFocusNeighbors",
                 BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
-            if (method != null)
-            {
-                method.Invoke(pauseMenuNode, null);
-                Log.Info("[MultiplayerRestart] RebuildFocusNeighbors called.");
-            }
+            method?.Invoke(pauseMenuNode, null);
         }
-        catch (Exception ex)
-        {
-            Log.Warn($"[MultiplayerRestart] RebuildFocusNeighbors failed: {ex.Message}");
-        }
+        catch { }
     }
 
     private static void CopyStyleFromSibling(Node container, Button target)
@@ -380,11 +414,8 @@ public static class PauseMenuPatch
     {
         if (depth > maxDepth) return;
         var indent = new string(' ', depth * 2);
-        var typeName = node.GetType().Name;
-        Log.Info($"[MultiplayerRestart] {indent}{node.Name} ({typeName}) children={node.GetChildCount()}");
+        Log.Info($"[MultiplayerRestart] {indent}{node.Name} ({node.GetType().Name}) children={node.GetChildCount()}");
         foreach (var child in node.GetChildren())
-        {
             DumpNodeTree(child, depth + 1, maxDepth);
-        }
     }
 }
